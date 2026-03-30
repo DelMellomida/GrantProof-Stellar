@@ -10,3 +10,5 @@
 # IDE/editor
 .idea/
 .vscode/
+
+*/node_modules/

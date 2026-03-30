@@ -4,9 +4,18 @@
 
 ---
 
+
+## Important
+🔗 https://stellar.expert/explorer/testnet/tx/c3be61fc9136f854f2c39ca2c8c8644960f64aac2a61c81636b1b4805cddff86
+🔗 https://lab.stellar.org/r/testnet/contract/CALNJGO4OMS6PCZIW3HFGDIDFMDCH6YODCOE5SRVQ7EVSCUKWESJ5OIM
+
+Contract ID: CALNJGO4OMS6PCZIW3HFGDIDFMDCH6YODCOE5SRVQ7EVSCUKWESJ5OIM
+
+---
+
 ## The Problem
 
-An NGO in Jakarta receives a $10,000 donor grant for flood relief, but the donor — a diaspora
+An NGO in Philippines receives a $10,000 donor grant for flood relief, but the donor — a diaspora
 community in the US — has no way to verify how the money was spent. The NGO submits a PDF report
 by email weeks later, which no one can authenticate, and donor trust erodes. The next grant cycle
 is delayed or cancelled entirely because there is no tamper-proof audit trail.
@@ -97,6 +106,42 @@ cargo test
 # test tests::test_storage_state_after_submit_and_audit ... ok
 # test result: ok. 3 passed; 0 failed
 ```
+
+---
+
+## Frontend (React + Vite)
+
+The repo now includes a frontend app in `frontend/` that connects to the deployed Soroban contract.
+
+### 1) Configure environment
+
+```bash
+cd frontend
+cp .env.example .env
+```
+
+Default values are already set for your Testnet deployment:
+
+- `VITE_CONTRACT_ID=CALNJGO4OMS6PCZIW3HFGDIDFMDCH6YODCOE5SRVQ7EVSCUKWESJ5OIM`
+- `VITE_NETWORK_PASSPHRASE=Test SDF Network ; September 2015`
+- `VITE_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org`
+
+### 2) Run frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the local URL from Vite, connect Freighter, and use the four MVP flows:
+
+1. NGO `submit_proof`
+2. Admin `audit_proof`
+3. Admin `release_tranche`
+4. Public `get_grant`
+
+> Note: Freighter must be on Testnet and the connected account must match the role required by each contract function.
 
 ---
 
@@ -197,4 +242,4 @@ reporting tool offers today.
 
 ## License
 
-MIT License © 2026 GrantProof Team
+MIT License © 2026 GrantProof
