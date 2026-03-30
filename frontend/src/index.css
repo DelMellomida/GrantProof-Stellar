@@ -18,11 +18,18 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #020617;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(56, 189, 248, 0.15), transparent 35%),
+    radial-gradient(circle at 85% 0%, rgba(59, 130, 246, 0.12), transparent 30%),
+    #020617;
 }
 
 h1,
 h2,
 p {
   margin: 0;
+}
+
+h2 {
+  font-size: 1.05rem;
 }

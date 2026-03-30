@@ -177,6 +177,14 @@ const errorEntries = Object.entries(ContractError)
 export const humanizeContractError = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
 
+  if (
+    /zero balance is not sufficient to spend|Error\(Contract,\s*#10\)/i.test(
+      message,
+    )
+  ) {
+    return 'Insufficient fund token balance on the GrantProof contract. Transfer token funds to the contract address first, then retry release_tranche.'
+  }
+
   if (/not a contract address|Error\(Object,\s*InvalidInput\)/i.test(message)) {
     return 'Invalid fund token address for release. Re-run initialize() with a valid Soroban token contract address (C...), then retry release_tranche.'
   }

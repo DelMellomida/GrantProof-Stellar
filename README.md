@@ -13,6 +13,31 @@ Contract ID: CALNJGO4OMS6PCZIW3HFGDIDFMDCH6YODCOE5SRVQ7EVSCUKWESJ5OIM
 
 ---
 
+## Quick Start (5 commands)
+
+Use this if you want the fastest path to run the live testnet flow.
+
+```bash
+# 1) Derive native XLM token contract (SAC) on testnet
+stellar contract id asset --asset native --network testnet
+
+# 2) One-time initialize (replace placeholders)
+stellar contract invoke --id <GRANTPROOF_CONTRACT_ID_C...> --source <ADMIN_ALIAS> --network testnet -- initialize --admin <ADMIN_G...> --fund_token <TOKEN_CONTRACT_C...> --tranche_amount 1000000000
+
+# 3) Fund GrantProof contract with token balance (replace placeholders)
+stellar contract invoke --id <TOKEN_CONTRACT_C...> --source <FUNDER_ALIAS> --network testnet -- transfer --from <FUNDER_G...> --to <GRANTPROOF_CONTRACT_ID_C...> --amount 1000000000
+
+# 4) Run frontend
+cd frontend && npm install && npm run dev
+
+# 5) Verify contract token balance before release
+stellar contract invoke --id <TOKEN_CONTRACT_C...> --network testnet -- balance --id <GRANTPROOF_CONTRACT_ID_C...>
+```
+
+Expected user flow in UI: initialize (once) → submit_proof → audit_proof → release_tranche → get_grant.
+
+---
+
 ## The Problem
 
 An NGO in Philippines receives a $10,000 donor grant for flood relief, but the donor — a diaspora
@@ -136,12 +161,19 @@ npm run dev
 
 Open the local URL from Vite, connect Freighter, and use the four MVP flows:
 
+0. Admin `initialize` (required once)
 1. NGO `submit_proof`
 2. Admin `audit_proof`
 3. Admin `release_tranche`
 4. Public `get_grant`
 
 > Note: Freighter must be on Testnet and the connected account must match the role required by each contract function.
+
+### Frontend notes (important)
+
+- `fund_token` in initialize **must** be a Soroban token contract address (`C...`), not a wallet (`G...`).
+- `fund_token` must **not** be your GrantProof contract ID.
+- `release_tranche` sends tokens **from the GrantProof contract balance**. You must pre-fund the contract.
 
 ---
 
@@ -171,10 +203,107 @@ soroban contract invoke \
   --network testnet \
   -- initialize \
   --admin       <ADMIN_ADDRESS> \
-  --fund_token  <XLM_TOKEN_ADDRESS> \
+  --fund_token  <TOKEN_CONTRACT_ADDRESS_C...> \
   --tranche_amount 1000000000
   # 1000000000 stroops = 100 XLM
 ```
+
+---
+
+## Get fund token contract address (SAC)
+
+For native XLM on testnet:
+
+```bash
+stellar contract id asset --asset native --network testnet
+# Returns a C... token contract address
+```
+
+Example output used in this project:
+
+`CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`
+
+For other assets (USDC-like), use:
+
+```bash
+stellar contract id asset --asset "<ASSET_CODE>:<ISSUER_G...>" --network testnet
+```
+
+---
+
+## Fund the contract before release
+
+`release_tranche` transfers from the GrantProof contract to NGO wallet. If contract balance is 0, release fails.
+
+### 1) Get source wallet address
+
+```bash
+stellar keys address <YOUR_SOURCE_ALIAS>
+```
+
+### 2) Transfer token funds to GrantProof contract
+
+```bash
+stellar contract invoke \
+  --id <TOKEN_CONTRACT_ADDRESS_C...> \
+  --source <YOUR_SOURCE_ALIAS> \
+  --network testnet \
+  -- transfer \
+  --from <YOUR_SOURCE_G...> \
+  --to <GRANTPROOF_CONTRACT_ID_C...> \
+  --amount <AMOUNT>
+```
+
+Example:
+
+```bash
+stellar contract invoke \
+  --id CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+  --source jhondel \
+  --network testnet \
+  -- transfer \
+  --from GCIGI6EC5PFDLRRCNC4I4XPECCYDURZJKP5WDVQJDD26U2FMNC7IXQMF \
+  --to CALNJGO4OMS6PCZIW3HFGDIDFMDCH6YODCOE5SRVQ7EVSCUKWESJ5OIM \
+  --amount 1000000000
+```
+
+### 3) Verify contract token balance
+
+```bash
+stellar contract invoke \
+  --id <TOKEN_CONTRACT_ADDRESS_C...> \
+  --network testnet \
+  -- balance \
+  --id <GRANTPROOF_CONTRACT_ID_C...>
+```
+
+---
+
+## Common Errors and Fixes
+
+### `Do not know how to serialize a BigInt`
+- Cause: frontend tried to `JSON.stringify` a `BigInt` value from `get_grant`.
+- Fix: already handled in frontend via BigInt-safe stringify.
+
+### `Contract panic ... UnreachableCodeReached ... audit_proof`
+- Cause: contract likely not initialized yet (`Admin` / `FundToken` / `TrancheAmount` missing).
+- Fix: run `initialize` once on the same contract ID.
+
+### `not a contract address`
+- Cause: `fund_token` was not a `C...` token contract address.
+- Fix: use `stellar contract id asset ...` to derive proper SAC contract ID.
+
+### `Contract re-entry is not allowed`
+- Cause: `fund_token` was set to the GrantProof contract ID itself.
+- Fix: re-initialize using a separate token contract address.
+
+### `Error(Contract, #10)` with `zero balance is not sufficient to spend`
+- Cause: GrantProof contract has no balance in fund token.
+- Fix: transfer tokens to GrantProof contract address, then retry `release_tranche`.
+
+### `Contract error: AlreadySubmitted`
+- Cause: duplicate `proof_hash` submitted.
+- Fix: use a new proof hash or continue flow with existing one (`audit_proof` → `release_tranche`).
 
 ---
 
