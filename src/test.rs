@@ -1,159 +1,112 @@
-#![cfg(test)]
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{testutils::Address as _, token, Address, Env, String};
+    use crate::{GrantProofContract, GrantProofContractClient};
 
-use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
-};
+    // ─── Helper: deploy contract + fund it with tokens ────────────────────────
+    fn setup(env: &Env) -> (GrantProofContractClient<'_>, Address, Address, i128) {
+        let contract_id = env.register_contract(None, GrantProofContract);
+        let client      = GrantProofContractClient::new(env, &contract_id);
 
-fn setup() -> (Env, Address, Address, Address, Address) {
-    let e = Env::default();
-    e.mock_all_auths();
+        let admin          = Address::generate(env);
+        let tranche_amount = 1_000_000_000_i128; // 100 XLM
 
-    let admin = Address::generate(&e);
-    let recipient = Address::generate(&e);
-    let token_admin = Address::generate(&e);
+        // Deploy mock token and pre-fund the contract so it can release tranches
+        let token = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_id = token.address();
+        let token_admin_client = token::StellarAssetClient::new(env, &token_id);
+        token_admin_client
+            .mock_all_auths()
+            .mint(&contract_id, &(tranche_amount * 10));
 
-    let token_contract = e.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_address = token_contract.address();
+        client
+            .mock_all_auths()
+            .initialize(&admin, &token_id, &tranche_amount);
 
-    let contract_id = e.register(DriftLock, ());
-    let client = DriftLockClient::new(&e, &contract_id);
+        (client, admin, token_id, tranche_amount)
+    }
 
-    // cap: 1000, window: 100 ledgers
-    client.initialize(&admin, &token_address, &1000i128, &100u32);
+    // ─── TEST 1: Happy Path ───────────────────────────────────────────────────
+    // Full end-to-end: NGO submits proof → admin audits → tranche released →
+    // assert NGO wallet balance equals tranche_amount.
+    #[test]
+    fn test_submit_audit_and_release_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    // Fund the contract
-    let sac = StellarAssetClient::new(&e, &token_address);
-    sac.mint(&contract_id, &5000i128);
+        let (client, _, token_id, tranche_amount) = setup(&env);
 
-    (e, contract_id, admin, recipient, token_address)
-}
+        let ngo_wallet = Address::generate(&env);
+        let proof_hash = String::from_str(&env, "sha256_receipt_bundle_q1_2026");
 
-#[test]
-fn test_withdraw_within_limit() {
-    let (e, contract_id, admin, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
+        // Step 1 — NGO submits expense proof
+        client
+            .submit_proof(&proof_hash, &ngo_wallet, &500_000_000);
 
-    client.withdraw(&admin, &recipient, &500i128);
+        // Step 2 — Donor admin audits and approves
+        let audit_result = client.audit_proof(&proof_hash);
+        assert_eq!(audit_result, true);
 
-    let (cap, spent, _, _) = client.window_state();
-    assert_eq!(cap, 1000);
-    assert_eq!(spent, 500);
-}
+        // Step 3 — Admin releases tranche
+        client
+            .release_tranche(&proof_hash);
 
-#[test]
-fn test_withdraw_exceeds_limit() {
-    let (e, contract_id, admin, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
+        // Assert funds actually arrived in the NGO wallet
+        let balance = token::Client::new(&env, &token_id).balance(&ngo_wallet);
+        assert_eq!(balance, tranche_amount, "NGO wallet must hold the full tranche");
+    }
 
-    client.withdraw(&admin, &recipient, &800i128).unwrap();
+    // ─── TEST 2: Edge Case — Duplicate Proof Rejected ─────────────────────────
+    // An NGO submitting the same proof_hash twice must be rejected with
+    // AlreadySubmitted — preventing a single receipt from unlocking two tranches.
+    #[test]
+    fn test_duplicate_proof_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let result = std::panic::catch_unwind(|| {
-        client.withdraw(&admin, &recipient, &300i128);
-    });
-    assert!(result.is_err());
-}
+        let (client, _, _, _) = setup(&env);
 
-#[test]
-fn test_window_reset_after_expiry() {
-    let (e, contract_id, admin, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
+        let ngo_wallet = Address::generate(&env);
+        let proof_hash = String::from_str(&env, "sha256_duplicate_test");
 
-    client.withdraw(&admin, &recipient, &1000i128).unwrap();
+        // First submission succeeds
+        client
+            .submit_proof(&proof_hash, &ngo_wallet, &200_000_000);
 
-    // Advance ledger past the 100-ledger window
-    e.ledger().with_mut(|l| l.sequence_number += 101);
+        // Second submission with same hash must fail
+        let second = client.try_submit_proof(&proof_hash, &ngo_wallet, &200_000_000);
+        assert!(
+            second.is_err() || matches!(second, Ok(Err(_))),
+            "Duplicate proof must fail on second submission"
+        );
+    }
 
-    // Should succeed — new window, spent reset to 0
-    client.withdraw(&admin, &recipient, &1000i128).unwrap();
+    // ─── TEST 3: State Verification ───────────────────────────────────────────
+    // After submit_proof, storage must reflect approved=false and released=false.
+    // After audit_proof, approved must flip to true while released stays false.
+    #[test]
+    fn test_storage_state_after_submit_and_audit() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let (_, spent, _, _) = client.window_state();
-    assert_eq!(spent, 1000);
-}
+        let (client, _, _, _) = setup(&env);
 
-#[test]
-fn test_unauthorized_withdraw() {
-    let (e, contract_id, _, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
+        let ngo_wallet = Address::generate(&env);
+        let proof_hash = String::from_str(&env, "sha256_state_check");
 
-    let rando = Address::generate(&e);
-    let result = std::panic::catch_unwind(|| {
-        client.withdraw(&rando, &recipient, &100i128);
-    });
-    assert!(result.is_err());
-}
+        client
+            .submit_proof(&proof_hash, &ngo_wallet, &300_000_000);
 
-#[test]
-fn test_set_cap() {
-    let (e, contract_id, admin, _, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
+        // ── Assert state after submission ─────────────────────────────────────
+        let record = client.get_grant(&proof_hash).expect("Record must exist");
+        assert!(!record.approved, "approved must be false before audit");
+        assert!(!record.released, "released must be false before tranche release");
+        assert_eq!(record.ngo_wallet, ngo_wallet, "Stored wallet must match");
 
-    client.set_cap(&admin, &2000i128).unwrap();
-    let (cap, _, _, _) = client.window_state();
-    assert_eq!(cap, 2000);
-}
-
-#[test]
-fn test_set_cap_unauthorized() {
-    let (e, contract_id, _, _, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
-
-    let rando = Address::generate(&e);
-    let result = std::panic::catch_unwind(|| {
-        client.set_cap(&rando, &9999i128);
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_deposit_and_withdraw() {
-    let (e, contract_id, admin, recipient, token_address) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
-
-    let depositor = Address::generate(&e);
-    let sac = StellarAssetClient::new(&e, &token_address);
-    sac.mint(&depositor, &500i128);
-
-    // Deposit 500 into the contract
-    client.deposit(&depositor, &500i128);
-
-    // Withdraw 500
-    client.withdraw(&admin, &recipient, &500i128).unwrap();
-
-    let token_client = TokenClient::new(&e, &token_address);
-    assert_eq!(token_client.balance(&recipient), 500);
-}
-
-#[test]
-fn test_multiple_withdrawals_within_window() {
-    let (e, contract_id, admin, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
-
-    client.withdraw(&admin, &recipient, &300i128);
-    client.withdraw(&admin, &recipient, &300i128);
-    client.withdraw(&admin, &recipient, &300i128);
-
-    let (_, spent, _, _) = client.window_state();
-    assert_eq!(spent, 900);
-
-    // One more 300 would exceed cap of 1000
-    let result = std::panic::catch_unwind(|| {
-        client.withdraw(&admin, &recipient, &300i128);
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_window_state_returns_correct_values() {
-    let (e, contract_id, admin, recipient, _) = setup();
-    let client = DriftLockClient::new(&e, &contract_id);
-
-    client.withdraw(&admin, &recipient, &250i128);
-
-    let (cap, spent, window, _) = client.window_state();
-    assert_eq!(cap, 1000);
-    assert_eq!(spent, 250);
-    assert_eq!(window, 100);
+        // ── Assert state after audit ──────────────────────────────────────────
+        client.audit_proof(&proof_hash);
+        let audited = client.get_grant(&proof_hash).expect("Record must still exist");
+        assert!(audited.approved,  "approved must be true after audit");
+        assert!(!audited.released, "released must still be false before release_tranche");
+    }
 }
